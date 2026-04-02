@@ -1,0 +1,1104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiniC Compiler — LLVM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d0f14;--bg2:#13161d;--bg3:#1a1e28;--border:#2a2f3e;--border2:#353c50;
+  --accent:#4ade80;--accent2:#22d3ee;--accent3:#f472b6;
+  --text:#e2e8f0;--text2:#94a3b8;--text3:#64748b;
+  --error:#f87171;--success:#4ade80;
+  --radius:10px;--font-mono:'JetBrains Mono',monospace;--font-ui:'Syne',sans-serif;
+}
+html,body,#root{height:100%;background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size:14px;line-height:1.5;overflow:hidden}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+button{font-family:var(--font-ui);cursor:pointer;border:none;outline:none}
+textarea,pre{font-family:var(--font-mono)!important}
+a{color:inherit;text-decoration:none}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useCallback, useEffect, useRef } = React;
+
+// ─── SAMPLE CODE ─────────────────────────────────────────────────────────────
+const SAMPLE = `int factorial(int n) {
+  if (n <= 1) {
+    return 1;
+  }
+  return n * factorial(n - 1);
+}
+
+int main() {
+  int x;
+  x = 5;
+  int result;
+  result = factorial(x);
+  printf("%d! = %d\\n", x, result);
+
+  int i;
+  i = 0;
+  while (i < 5) {
+    printf("i = %d\\n", i);
+    i = i + 1;
+  }
+  return 0;
+}`;
+
+const EXAMPLES = {
+  'Factorial': SAMPLE,
+  'FizzBuzz': `int main() {
+  int i; i = 1;
+  while (i <= 15) {
+    if (i % 15 == 0) { printf("FizzBuzz\\n"); }
+    else { if (i % 3 == 0) { printf("Fizz\\n"); }
+    else { if (i % 5 == 0) { printf("Buzz\\n"); }
+    else { printf("%d\\n", i); } } }
+    i = i + 1;
+  }
+  return 0;
+}`,
+  'Sum Loop': `int sum(int n) {
+  int total; total = 0;
+  int i; i = 1;
+  while (i <= n) { total = total + i; i = i + 1; }
+  return total;
+}
+int main() {
+  int r; r = sum(10);
+  printf("Sum 1..10 = %d\\n", r);
+  return 0;
+}`,
+  'Power': `int power(int base, int exp) {
+  int result; result = 1;
+  int i; i = 0;
+  while (i < exp) { result = result * base; i = i + 1; }
+  return result;
+}
+int main() {
+  int r; r = power(2, 8);
+  printf("2^8 = %d\\n", r);
+  return 0;
+}`,
+};
+
+// ─── LEXER ───────────────────────────────────────────────────────────────────
+const KEYWORDS = new Set(['int','float','void','if','else','while','return','printf','bool','main']);
+const KEYWORD_TYPE = {int:'INT_KW',float:'FLOAT_KW',void:'VOID_KW',if:'IF_KW',else:'ELSE_KW',
+  while:'WHILE_KW',return:'RETURN_KW',printf:'PRINTF_KW',bool:'BOOL_KW',main:'IDENT'};
+
+function tokenize(code) {
+  const tokens = [], errors = [];
+  let i = 0, line = 1, lineStart = 0;
+
+  function makeToken(type, value) {
+    return { type, value, line, col: i - lineStart + 1 };
+  }
+
+  while (i < code.length) {
+    const start = i;
+    const ch = code[i];
+
+    // whitespace
+    if (/\s/.test(ch)) {
+      if (ch === '\n') { line++; lineStart = i + 1; }
+      i++; continue;
+    }
+    // line comment
+    if (ch === '/' && code[i+1] === '/') {
+      while (i < code.length && code[i] !== '\n') i++;
+      continue;
+    }
+    // block comment
+    if (ch === '/' && code[i+1] === '*') {
+      i += 2;
+      while (i < code.length - 1 && !(code[i] === '*' && code[i+1] === '/')) {
+        if (code[i] === '\n') { line++; lineStart = i + 1; }
+        i++;
+      }
+      i += 2; continue;
+    }
+    // string literal
+    if (ch === '"') {
+      let s = '"'; i++;
+      while (i < code.length && code[i] !== '"') {
+        if (code[i] === '\\') { s += code[i] + (code[i+1]||''); i += 2; }
+        else { s += code[i++]; }
+      }
+      s += '"'; i++;
+      tokens.push(makeToken('STRING_LIT', s));
+      continue;
+    }
+    // number
+    if (/\d/.test(ch)) {
+      let num = '';
+      while (i < code.length && /[\d]/.test(code[i])) num += code[i++];
+      if (code[i] === '.') { num += code[i++]; while (i < code.length && /\d/.test(code[i])) num += code[i++]; tokens.push(makeToken('FLOAT_LIT', num)); }
+      else tokens.push(makeToken('INT_LIT', num));
+      continue;
+    }
+    // identifier / keyword
+    if (/[a-zA-Z_]/.test(ch)) {
+      let word = '';
+      while (i < code.length && /\w/.test(code[i])) word += code[i++];
+      const type = KEYWORD_TYPE[word] || (KEYWORDS.has(word) ? word.toUpperCase()+'_KW' : 'IDENT');
+      tokens.push(makeToken(type, word));
+      continue;
+    }
+    // two-char ops
+    const two = ch + (code[i+1]||'');
+    const TWO = {'<=':'LE','>=':'GE','==':'EQ','!=':'NEQ','&&':'AND','||':'OR'};
+    if (TWO[two]) { tokens.push(makeToken(TWO[two], two)); i += 2; continue; }
+    // single-char
+    const ONE = {'+':'PLUS','-':'MINUS','*':'STAR','/':'SLASH','%':'PERCENT','=':'ASSIGN',
+      '<':'LT','>':'GT','(':'LPAREN',')':'RPAREN','{':'LBRACE','}':'RBRACE',
+      '[':'LBRACKET',']':'RBRACKET',';':'SEMICOLON',',':'COMMA'};
+    if (ONE[ch]) { tokens.push(makeToken(ONE[ch], ch)); i++; continue; }
+    errors.push(`Unexpected char '${ch}' at line ${line}`);
+    i++;
+  }
+  return { tokens, errors };
+}
+
+// ─── PARSER ──────────────────────────────────────────────────────────────────
+function parse(tokens) {
+  let pos = 0;
+  const errors = [];
+
+  function cur() { return tokens[pos] || {type:'EOF',value:'',line:-1,col:-1}; }
+  function peek(n=1) { return tokens[pos+n] || {type:'EOF'}; }
+  function consume(expected) {
+    const t = cur();
+    if (expected && t.type !== expected) throw new Error(`Expected ${expected}, got ${t.type} ('${t.value}') at line ${t.line}`);
+    pos++; return t;
+  }
+  function match(...types) { return types.includes(cur().type); }
+
+  function parseProgram() {
+    const body = [], children = [];
+    while (!match('EOF')) {
+      const d = parseTopLevel();
+      body.push(d); children.push(d);
+    }
+    return {type:'Program',body,children,label:'Program'};
+  }
+  function parseTopLevel() {
+    if (match('INT_KW','VOID_KW','FLOAT_KW')) {
+      const rt = consume(); const name = consume('IDENT');
+      if (match('LPAREN')) return parseFunction(rt, name);
+      return parseVarDecl(rt, name, false);
+    }
+    throw new Error(`Unexpected token '${cur().value}' at line ${cur().line}`);
+  }
+  function parseFunction(retType, name) {
+    consume('LPAREN');
+    const params = [];
+    while (!match('RPAREN')) {
+      const pt = consume(); const pn = consume('IDENT');
+      params.push({type:'Param',ptype:pt.value,name:pn.value,children:[],label:`param: ${pt.value} ${pn.value}`});
+      if (match('COMMA')) consume('COMMA');
+    }
+    consume('RPAREN');
+    const body = parseBlock();
+    return {type:'FunctionDecl',ret_type:retType.value,name:name.value,params,body,
+      label:`fn ${retType.value} ${name.value}()`,children:[...params,body]};
+  }
+  function parseBlock() {
+    consume('LBRACE');
+    const stmts = [];
+    while (!match('RBRACE','EOF')) stmts.push(parseStatement());
+    consume('RBRACE');
+    return {type:'Block',stmts,children:stmts,label:'Block'};
+  }
+  function parseStatement() {
+    if (match('INT_KW','FLOAT_KW')) {
+      const vt = consume(); const n = consume('IDENT'); return parseVarDecl(vt,n,true);
+    }
+    if (match('IF_KW')) return parseIf();
+    if (match('WHILE_KW')) return parseWhile();
+    if (match('RETURN_KW')) return parseReturn();
+    if (match('PRINTF_KW')) return parsePrintf();
+    if (match('LBRACE')) return parseBlock();
+    return parseExprStmt();
+  }
+  function parseVarDecl(vtype, name, local) {
+    let init = null;
+    if (match('ASSIGN')) { consume('ASSIGN'); init = parseExpr(); }
+    consume('SEMICOLON');
+    return {type:'VarDecl',vtype:vtype.value,name:name.value,init,
+      label:`var ${vtype.value} ${name.value}`,children:init?[init]:[]};
+  }
+  function parseIf() {
+    consume('IF_KW'); consume('LPAREN');
+    const cond = parseExpr(); consume('RPAREN');
+    const then = match('LBRACE') ? parseBlock() : parseStatement();
+    let els = null;
+    if (match('ELSE_KW')) { consume('ELSE_KW'); els = match('LBRACE') ? parseBlock() : parseStatement(); }
+    return {type:'IfStmt',cond,then,else:els,label:'if',children:[cond,then,...(els?[els]:[])]}
+  }
+  function parseWhile() {
+    consume('WHILE_KW'); consume('LPAREN');
+    const cond = parseExpr(); consume('RPAREN');
+    const body = match('LBRACE') ? parseBlock() : parseStatement();
+    return {type:'WhileStmt',cond,body,label:'while',children:[cond,body]};
+  }
+  function parseReturn() {
+    consume('RETURN_KW');
+    let val = null;
+    if (!match('SEMICOLON')) val = parseExpr();
+    consume('SEMICOLON');
+    return {type:'ReturnStmt',value:val,label:'return',children:val?[val]:[]};
+  }
+  function parsePrintf() {
+    consume('PRINTF_KW'); consume('LPAREN');
+    const args = [];
+    while (!match('RPAREN','EOF')) { args.push(parseExpr()); if (match('COMMA')) consume('COMMA'); }
+    consume('RPAREN'); consume('SEMICOLON');
+    return {type:'PrintfStmt',args,label:'printf',children:args};
+  }
+  function parseExprStmt() {
+    const expr = parseExpr(); consume('SEMICOLON');
+    return {type:'ExprStmt',expr,label:'ExprStmt',children:[expr]};
+  }
+  function parseExpr() { return parseAssign(); }
+  function parseAssign() {
+    const left = parseOr();
+    if (match('ASSIGN')) {
+      consume('ASSIGN'); const right = parseAssign();
+      return {type:'Assign',left,right,label:'= (assign)',children:[left,right]};
+    }
+    return left;
+  }
+  function parseBinary(ops, next) {
+    let left = next();
+    while (ops.includes(cur().type)) {
+      const op = consume();
+      const right = next();
+      left = {type:'BinOp',op:op.value,left,right,label:op.value,children:[left,right]};
+    }
+    return left;
+  }
+  function parseOr() { return parseBinary(['OR'], parseAnd); }
+  function parseAnd() { return parseBinary(['AND'], parseEq); }
+  function parseEq() { return parseBinary(['EQ','NEQ'], parseRel); }
+  function parseRel() { return parseBinary(['LT','GT','LE','GE'], parseAdd); }
+  function parseAdd() { return parseBinary(['PLUS','MINUS'], parseMul); }
+  function parseMul() { return parseBinary(['STAR','SLASH','PERCENT'], parseUnary); }
+  function parseUnary() {
+    if (match('MINUS')) { consume('MINUS'); const o = parsePrimary(); return {type:'UnaryOp',op:'-',operand:o,label:'unary -',children:[o]}; }
+    return parsePrimary();
+  }
+  function parsePrimary() {
+    const t = cur();
+    if (match('INT_LIT')) { consume(); return {type:'IntLiteral',value:parseInt(t.value),label:t.value,children:[]}; }
+    if (match('FLOAT_LIT')) { consume(); return {type:'FloatLiteral',value:parseFloat(t.value),label:t.value,children:[]}; }
+    if (match('STRING_LIT')) { consume(); return {type:'StringLiteral',value:t.value,label:t.value,children:[]}; }
+    if (match('IDENT')) {
+      consume();
+      if (match('LPAREN')) {
+        consume('LPAREN'); const args = [];
+        while (!match('RPAREN','EOF')) { args.push(parseExpr()); if(match('COMMA'))consume('COMMA'); }
+        consume('RPAREN');
+        return {type:'FuncCall',name:t.value,args,label:`call ${t.value}()`,children:args};
+      }
+      return {type:'Identifier',name:t.value,label:t.value,children:[]};
+    }
+    if (match('LPAREN')) { consume('LPAREN'); const e = parseExpr(); consume('RPAREN'); return e; }
+    throw new Error(`Unexpected token '${t.value}' at line ${t.line}`);
+  }
+
+  try { return {ast: parseProgram(), errors: []}; }
+  catch(e) { return {ast: null, errors: [e.message]}; }
+}
+
+// ─── SEMANTIC ────────────────────────────────────────────────────────────────
+function analyze(ast) {
+  if (!ast) return [];
+  const errors = [];
+  function visit(node, scope) {
+    if (!node || typeof node !== 'object') return;
+    switch(node.type) {
+      case 'Program': node.body.forEach(d => visit(d, scope)); break;
+      case 'FunctionDecl': {
+        scope[node.name] = node.ret_type;
+        const fn_scope = {__parent__: scope};
+        node.params.forEach(p => fn_scope[p.name] = p.ptype);
+        visit(node.body, fn_scope); break;
+      }
+      case 'Block': {
+        const blk = {__parent__: scope};
+        node.stmts.forEach(s => visit(s, blk)); break;
+      }
+      case 'VarDecl':
+        if (scope[node.name] && scope[node.name] !== '__parent__') errors.push(`Variable '${node.name}' already declared`);
+        scope[node.name] = node.vtype;
+        if (node.init) visit(node.init, scope); break;
+      case 'Identifier': {
+        let s = scope;
+        while (s && !s[node.name]) s = s.__parent__;
+        if (!s) errors.push(`Undeclared variable '${node.name}'`);
+        break;
+      }
+      case 'Assign':
+        if (node.left.type === 'Identifier') {
+          let s = scope; while (s && !s[node.left.name]) s = s.__parent__;
+          if (!s) errors.push(`Assignment to undeclared variable '${node.left.name}'`);
+        }
+        visit(node.right, scope); break;
+      default:
+        (node.children || []).forEach(c => c && visit(c, scope));
+    }
+  }
+  visit(ast, {});
+  return errors;
+}
+
+// ─── IR GENERATOR ────────────────────────────────────────────────────────────
+function generateIR(ast) {
+  if (!ast) return '; No IR — fix errors first\n';
+  let tc = 0, lc = 0, sc = 0;
+  const lines = [], strings = [], vars = {};
+  const newTemp = () => `%t${++tc}`;
+  const newLabel = p => `${p}${++lc}`;
+
+  function emit(l) { lines.push(l); }
+  function gen(node) {
+    if (!node) return '0';
+    switch(node.type) {
+      case 'Program':
+        emit("; ModuleID = 'minic'"); emit('target triple = "x86_64-pc-linux-gnu"'); emit('');
+        emit('declare i32 @printf(i8* nocapture, ...) nounwind'); emit('');
+        node.body.forEach(gen); break;
+      case 'FunctionDecl': {
+        const ret = node.ret_type === 'int' ? 'i32' : 'void';
+        const pir = node.params.map(p => `i32 %${p.name}_arg`).join(', ');
+        emit(`define ${ret} @${node.name}(${pir}) {`); emit('entry:');
+        node.params.forEach(p => {
+          vars[p.name] = `%${p.name}_ptr`;
+          emit(`  %${p.name}_ptr = alloca i32`);
+          emit(`  store i32 %${p.name}_arg, i32* %${p.name}_ptr`);
+        });
+        gen(node.body);
+        emit(ret === 'void' ? '  ret void' : '  ret i32 0');
+        emit('}'); emit(''); break;
+      }
+      case 'Block': node.stmts.forEach(gen); break;
+      case 'VarDecl':
+        vars[node.name] = `%${node.name}_ptr`;
+        emit(`  %${node.name}_ptr = alloca i32`);
+        if (node.init) { const v = gen(node.init); emit(`  store i32 ${v}, i32* %${node.name}_ptr`); }
+        break;
+      case 'Assign': {
+        const v = gen(node.right);
+        if (node.left.type === 'Identifier') emit(`  store i32 ${v}, i32* ${vars[node.left.name] || `%${node.left.name}_ptr`}`);
+        return v;
+      }
+      case 'Identifier': { const t = newTemp(); emit(`  ${t} = load i32, i32* ${vars[node.name] || `%${node.name}_ptr`}`); return t; }
+      case 'IntLiteral': return String(node.value);
+      case 'FloatLiteral': return String(Math.trunc(node.value));
+      case 'StringLiteral': {
+        const s = node.value.slice(1,-1); const len = s.length + 1; const name = `@str${++sc}`;
+        strings.push(`${name} = private constant [${len} x i8] c"${s}\\00"`);
+        const t = newTemp(); emit(`  ${t} = getelementptr [${len} x i8], [${len} x i8]* ${name}, i32 0, i32 0`); return t;
+      }
+      case 'BinOp': {
+        const l = gen(node.left), r = gen(node.right), t = newTemp();
+        const ops = {'+':'add','-':'sub','*':'mul','/':'sdiv','%':'srem','<':'icmp slt','>':'icmp sgt','<=':'icmp sle','>=':'icmp sge','==':'icmp eq','!=':'icmp ne','&&':'and','||':'or'};
+        emit(`  ${t} = ${ops[node.op]||'add'} i32 ${l}, ${r}`); return t;
+      }
+      case 'UnaryOp': { const v = gen(node.operand), t = newTemp(); emit(`  ${t} = sub i32 0, ${v}`); return t; }
+      case 'IfStmt': {
+        const tl = newLabel('then'), el = newLabel('else'), end = newLabel('endif');
+        const cond = gen(node.cond), tc2 = newTemp();
+        emit(`  ${tc2} = icmp ne i32 ${cond}, 0`);
+        emit(`  br i1 ${tc2}, label %${tl}, label %${node.else ? el : end}`);
+        emit(`${tl}:`); gen(node.then); emit(`  br label %${end}`);
+        if (node.else) { emit(`${el}:`); gen(node.else); emit(`  br label %${end}`); }
+        emit(`${end}:`); break;
+      }
+      case 'WhileStmt': {
+        const cl = newLabel('wcond'), bl = newLabel('wbody'), el = newLabel('wend');
+        emit(`  br label %${cl}`); emit(`${cl}:`);
+        const cond = gen(node.cond), tc2 = newTemp();
+        emit(`  ${tc2} = icmp ne i32 ${cond}, 0`);
+        emit(`  br i1 ${tc2}, label %${bl}, label %${el}`);
+        emit(`${bl}:`); gen(node.body); emit(`  br label %${cl}`); emit(`${el}:`); break;
+      }
+      case 'ReturnStmt': emit(node.value ? `  ret i32 ${gen(node.value)}` : '  ret void'); break;
+      case 'PrintfStmt': {
+        if (!node.args.length) break;
+        const fmt = gen(node.args[0]);
+        const rest = node.args.slice(1).map(a => `i32 ${gen(a)}`).join(', ');
+        emit(`  call i32 (i8*, ...) @printf(i8* ${fmt}${rest ? ', ' + rest : ''})`); break;
+      }
+      case 'FuncCall': {
+        const args = node.args.map(a => `i32 ${gen(a)}`).join(', ');
+        const t = newTemp(); emit(`  ${t} = call i32 @${node.name}(${args})`); return t;
+      }
+      case 'ExprStmt': gen(node.expr); break;
+    }
+    return '0';
+  }
+  gen(ast);
+  return [...(strings.length ? [...strings, ''] : []), ...lines].join('\n');
+}
+
+// ─── INTERPRETER ─────────────────────────────────────────────────────────────
+function interpret(ast) {
+  const output = [];
+  const funcs = {};
+
+  function evalExpr(node, env) {
+    if (!node) return 0;
+    switch(node.type) {
+      case 'IntLiteral': return node.value;
+      case 'FloatLiteral': return node.value;
+      case 'StringLiteral': return node.value.slice(1,-1).replace(/\\n/g,'\n').replace(/\\t/g,'\t');
+      case 'Identifier': return env[node.name] ?? 0;
+      case 'BinOp': {
+        const l = evalExpr(node.left, env), r = evalExpr(node.right, env);
+        switch(node.op) {
+          case '+': return l+r; case '-': return l-r; case '*': return l*r;
+          case '/': return typeof l==='number'&&typeof r==='number' ? (Number.isInteger(l)&&Number.isInteger(r) ? Math.trunc(l/r) : l/r) : 0;
+          case '%': return l%r; case '<': return l<r?1:0; case '>': return l>r?1:0;
+          case '<=': return l<=r?1:0; case '>=': return l>=r?1:0;
+          case '==': return l===r?1:0; case '!=': return l!==r?1:0;
+          case '&&': return (l&&r)?1:0; case '||': return (l||r)?1:0;
+        }
+      }
+      case 'UnaryOp': return -evalExpr(node.operand, env);
+      case 'Assign': {
+        const val = evalExpr(node.right, env);
+        if (node.left.type === 'Identifier') env[node.left.name] = val;
+        return val;
+      }
+      case 'FuncCall': {
+        const fn = funcs[node.name];
+        if (!fn) return 0;
+        const fenv = {};
+        fn.params.forEach((p,i) => fenv[p.name] = evalExpr(node.args[i], env));
+        const ret = execBlock(fn.body, fenv);
+        return ret?.__ret__ ?? 0;
+      }
+    }
+    return 0;
+  }
+
+  function execBlock(node, env) {
+    const local = {...env};
+    for (const stmt of (node.stmts || [])) {
+      const r = execStmt(stmt, local);
+      if (r?.__ret__ !== undefined) return r;
+    }
+    Object.keys(local).forEach(k => { if (k in env) env[k] = local[k]; });
+  }
+
+  function execStmt(node, env) {
+    switch(node.type) {
+      case 'VarDecl': env[node.name] = node.init ? evalExpr(node.init, env) : 0; break;
+      case 'ExprStmt': evalExpr(node.expr, env); break;
+      case 'ReturnStmt': return {__ret__: node.value ? evalExpr(node.value, env) : 0};
+      case 'PrintfStmt': {
+        if (!node.args.length) break;
+        const fmt = evalExpr(node.args[0], env);
+        const args = node.args.slice(1).map(a => evalExpr(a, env));
+        let out = fmt, ai = 0;
+        out = out.replace(/%[dis%]/g, m => { if(m==='%%') return '%'; return args[ai++] !== undefined ? args[ai-1] : m; });
+        output.push(out); break;
+      }
+      case 'IfStmt':
+        if (evalExpr(node.cond, env)) return execBlock(node.then, env);
+        else if (node.else) return execBlock(node.else, env);
+        break;
+      case 'WhileStmt': {
+        let iters = 0;
+        while (evalExpr(node.cond, env) && iters++ < 10000) {
+          const r = execBlock(node.body, env);
+          if (r?.__ret__ !== undefined) return r;
+        }
+        break;
+      }
+      case 'Block': return execBlock(node, env);
+    }
+  }
+
+  // Register functions
+  ast.body.forEach(d => { if (d.type === 'FunctionDecl') funcs[d.name] = d; });
+  const main = funcs.main;
+  if (main) execBlock(main.body, {});
+  return output.length ? output.join('') : '(Program executed — no output)';
+}
+
+// ─── COMPILE FUNCTION ────────────────────────────────────────────────────────
+function compile(code) {
+  const { tokens, errors: lexErrors } = tokenize(code);
+  const { ast, errors: parseErrors } = parse(tokens);
+  const semErrors = ast ? analyze(ast) : [];
+  const allErrors = [...lexErrors, ...parseErrors, ...semErrors];
+  const ir = (ast && allErrors.length === 0) ? generateIR(ast) : (ast ? generateIR(ast) : '; IR not generated due to errors');
+  const out = (ast && allErrors.length === 0) ? interpret(ast) : '';
+  return { tokens, ast, ir, output: out, errors: allErrors };
+}
+
+// ─── HIGHLIGHT ───────────────────────────────────────────────────────────────
+const KW_SET = new Set(['int','float','void','if','else','while','return','printf','bool']);
+function highlight(code) {
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return code.split('\n').map(line => {
+    let r = '', i = 0;
+    while (i < line.length) {
+      if (line[i]==='"') {
+        let e = i+1; while(e<line.length&&line[e]!=='"'){if(line[e]==='\\')e++;e++;} e++;
+        r+=`<span style="color:#f1fa8c">${esc(line.slice(i,e))}</span>`; i=e; continue;
+      }
+      if (line[i]==='/'&&line[i+1]==='/') { r+=`<span style="color:#6272a4;font-style:italic">${esc(line.slice(i))}</span>`; break; }
+      if (/\d/.test(line[i])) {
+        let n=''; while(i<line.length&&/[\d.]/.test(line[i]))n+=line[i++];
+        r+=`<span style="color:#bd93f9">${n}</span>`; continue;
+      }
+      if (/[a-zA-Z_]/.test(line[i])) {
+        let w=''; while(i<line.length&&/\w/.test(line[i]))w+=line[i++];
+        if (KW_SET.has(w)) r+=`<span style="color:#ff79c6;font-weight:600">${w}</span>`;
+        else if (line[i]==='(') r+=`<span style="color:#50fa7b">${w}</span>`;
+        else r+=`<span style="color:#8be9fd">${w}</span>`;
+        continue;
+      }
+      if (/[+\-*/%=<>!&|]/.test(line[i])) { r+=`<span style="color:#ff79c6">${esc(line[i])}</span>`; i++; continue; }
+      if (/[{}();,]/.test(line[i])) { r+=`<span style="color:#f8f8f2">${line[i]}</span>`; i++; continue; }
+      r+=esc(line[i]); i++;
+    }
+    return r;
+  }).join('\n');
+}
+
+// ─── COMPONENTS ──────────────────────────────────────────────────────────────
+const TOKEN_COLORS = {
+  INT_KW:'#ff79c6',IF_KW:'#ff79c6',ELSE_KW:'#ff79c6',WHILE_KW:'#ff79c6',
+  RETURN_KW:'#ff79c6',PRINTF_KW:'#ff79c6',FLOAT_KW:'#ff79c6',VOID_KW:'#ff79c6',
+  INT_LIT:'#bd93f9',FLOAT_LIT:'#bd93f9',STRING_LIT:'#f1fa8c',IDENT:'#8be9fd',
+  PLUS:'#ffb86c',MINUS:'#ffb86c',STAR:'#ffb86c',SLASH:'#ffb86c',
+  ASSIGN:'#ff79c6',EQ:'#ff79c6',NEQ:'#ff79c6',LT:'#ff79c6',GT:'#ff79c6',
+  LE:'#ff79c6',GE:'#ff79c6',AND:'#ff79c6',OR:'#ff79c6',
+  LBRACE:'#ffd700',RBRACE:'#ffd700',SEMICOLON:'#6272a4',COMMA:'#6272a4',
+};
+
+const AST_COLORS = {
+  Program:'#4ade80',FunctionDecl:'#22d3ee',Block:'#8b5cf6',VarDecl:'#f472b6',
+  IfStmt:'#fbbf24',WhileStmt:'#fb923c',ReturnStmt:'#34d399',PrintfStmt:'#60a5fa',
+  BinOp:'#a78bfa',Assign:'#f87171',Identifier:'#94a3b8',IntLiteral:'#86efac',
+  FloatLiteral:'#86efac',StringLiteral:'#fde68a',FuncCall:'#22d3ee',ExprStmt:'#64748b',Param:'#c084fc',
+};
+
+function ASTNode({node, depth=0}) {
+  const [collapsed, setCollapsed] = useState(depth > 3);
+  if (!node || typeof node !== 'object') return null;
+  const kids = (node.children||[]).filter(Boolean);
+  const color = AST_COLORS[node.type]||'#94a3b8';
+  const label = node.label||node.type;
+
+  return (
+    <div style={{paddingLeft: depth===0?0:18, position:'relative'}}>
+      {depth>0 && <div style={{position:'absolute',left:0,top:0,width:18,height:16,borderLeft:'1px dashed #2a2f3e',borderBottom:'1px dashed #2a2f3e',pointerEvents:'none'}}/>}
+      <div onClick={() => kids.length && setCollapsed(c=>!c)} style={{
+        display:'inline-flex',alignItems:'center',gap:6,padding:'3px 8px',marginBottom:3,
+        borderRadius:6,cursor:kids.length?'pointer':'default',
+        background:'rgba(255,255,255,0.03)',border:`1px solid ${color}22`,
+        transition:'background 0.1s',userSelect:'none',
+      }}
+        onMouseEnter={e=>e.currentTarget.style.background=`${color}11`}
+        onMouseLeave={e=>e.currentTarget.style.background='rgba(255,255,255,0.03)'}
+      >
+        {kids.length>0 && <span style={{color:'var(--text3)',fontSize:9,width:10}}>{collapsed?'▶':'▼'}</span>}
+        <span style={{fontSize:10,fontFamily:'var(--font-mono)',background:`${color}22`,color,borderRadius:4,padding:'1px 5px',fontWeight:600}}>{node.type}</span>
+        {label!==node.type && <span style={{fontSize:11,fontFamily:'var(--font-mono)',color:'var(--text2)'}}>{label}</span>}
+      </div>
+      {kids.length>0 && !collapsed && (
+        <div style={{borderLeft:'1px dashed #2a2f3e',marginLeft:10}}>
+          {kids.map((c,i) => <ASTNode key={i} node={c} depth={depth+1}/>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CodeEditor({code, onChange}) {
+  const taRef = useRef(), hiRef = useRef(), lnRef = useRef();
+  const lines = code.split('\n');
+  const sync = () => {
+    if(taRef.current && hiRef.current) { hiRef.current.scrollTop=taRef.current.scrollTop; hiRef.current.scrollLeft=taRef.current.scrollLeft; }
+    if(taRef.current && lnRef.current) lnRef.current.scrollTop=taRef.current.scrollTop;
+  };
+  const onKey = (e) => {
+    if(e.key==='Tab'){e.preventDefault();const s=e.target.selectionStart,en=e.target.selectionEnd;const n=code.slice(0,s)+'  '+code.slice(en);onChange(n);setTimeout(()=>{taRef.current.selectionStart=taRef.current.selectionEnd=s+2;},0);}
+  };
+  const shared = {fontFamily:'var(--font-mono)',fontSize:13,lineHeight:'21px',padding:'14px 14px 14px 0',border:'none',background:'transparent',whiteSpace:'pre',overflowWrap:'normal',wordBreak:'normal',width:'100%'};
+  return (
+    <div style={{display:'flex',background:'#1e1e2e',borderRadius:'var(--radius)',border:'1px solid var(--border)',overflow:'hidden',height:'100%',position:'relative'}}>
+      <div ref={lnRef} style={{...shared,width:44,minWidth:44,padding:'14px 8px',textAlign:'right',color:'#44475a',userSelect:'none',overflow:'hidden',flexShrink:0,borderRight:'1px solid #282a36',fontSize:12}}>
+        {lines.map((_,i)=><div key={i}>{i+1}</div>)}
+      </div>
+      <div style={{flex:1,position:'relative',overflow:'hidden'}}>
+        <pre ref={hiRef} aria-hidden="true" style={{...shared,position:'absolute',top:0,left:0,right:0,bottom:0,pointerEvents:'none',overflow:'auto',color:'#f8f8f2',paddingLeft:14,margin:0}} dangerouslySetInnerHTML={{__html:highlight(code)+'\n'}}/>
+        <textarea ref={taRef} value={code} onChange={e=>onChange(e.target.value)} onScroll={sync} onKeyDown={onKey} spellCheck={false} style={{...shared,position:'absolute',top:0,left:0,right:0,bottom:0,resize:'none',color:'transparent',caretColor:'#f8f8f2',overflow:'auto',paddingLeft:14,zIndex:1}}/>
+      </div>
+    </div>
+  );
+}
+
+// ─── APP ─────────────────────────────────────────────────────────────────────
+const PAGES = ['home','compiler','ast','history','settings'];
+const PAGE_ICONS = {home:'⬡',compiler:'◈',ast:'⬢',history:'◎',settings:'◇'};
+const PAGE_LABELS = {home:'Home',compiler:'Compiler',ast:'AST Viewer',history:'History',settings:'Settings'};
+
+const history_store = [];
+
+export default function App() {
+  const [page, setPage] = useState('compiler');
+  const [code, setCode] = useState(SAMPLE);
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState(null);
+  const [activeTab, setActiveTab] = useState('tokens');
+  const [showExamples, setShowExamples] = useState(false);
+  const [explaining, setExplaining] = useState(false);
+  const [explanation, setExplanation] = useState(null);
+
+  const handleCompile = useCallback(() => {
+    setLoading(true);
+    setStatus(null);
+    setExplanation(null);
+    setTimeout(() => {
+      try {
+        const r = compile(code);
+        setResult(r);
+        history_store.unshift({id: history_store.length+1, code, timestamp: new Date().toISOString(),
+          error_count: r.errors.length, token_count: r.tokens.length, has_ir: !!r.ir});
+        if (history_store.length > 50) history_store.pop();
+        setStatus(r.errors.length > 0
+          ? {type:'error', msg:`${r.errors.length} error${r.errors.length>1?'s':''} found`}
+          : {type:'success', msg:`✓ ${r.tokens.length} tokens · IR generated`});
+        setActiveTab('tokens');
+      } catch(e) {
+        setStatus({type:'error', msg:e.message});
+      }
+      setLoading(false);
+    }, 80);
+  }, [code]);
+
+  const handleExplain = async () => {
+    setExplaining(true);
+    try {
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:600,
+          messages:[{role:'user',content:`Explain this MiniC code in 4-5 bullet points for a beginner. Be concise.\n\n\`\`\`c\n${code}\n\`\`\``}]})
+      });
+      const d = await resp.json();
+      setExplanation(d.content?.[0]?.text || 'No explanation returned.');
+    } catch { setExplanation('✦ AI explanation requires an Anthropic API key.\n\nThis compiler runs fully in-browser — no backend needed!'); }
+    setExplaining(false);
+  };
+
+  const btn = (label, onClick, variant='secondary', disabled=false) => {
+    const styles = {
+      primary: {background:'var(--accent)',color:'#0d0f14',fontWeight:700},
+      secondary: {background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border)'},
+      pink: {background:'rgba(244,114,182,0.1)',color:'var(--accent3)',border:'1px solid rgba(244,114,182,0.25)'},
+    };
+    return (
+      <button onClick={onClick} disabled={disabled} style={{
+        ...styles[variant], padding:'8px 16px', borderRadius:8, fontSize:13,
+        display:'flex',alignItems:'center',gap:7, transition:'all 0.15s',
+        opacity: disabled ? 0.6 : 1, cursor: disabled ? 'default' : 'pointer',
+        fontFamily:'var(--font-ui)', fontWeight: variant==='primary' ? 700 : 500,
+      }}>{label}</button>
+    );
+  };
+
+  const renderHome = () => (
+    <div style={{height:'100%',overflow:'auto',padding:'36px 40px'}}>
+      <div style={{display:'inline-flex',alignItems:'center',gap:8,padding:'5px 14px',borderRadius:20,background:'rgba(74,222,128,0.08)',border:'1px solid rgba(74,222,128,0.2)',color:'var(--accent)',fontSize:12,fontWeight:500,marginBottom:20}}>
+        <div style={{width:6,height:6,borderRadius:'50%',background:'var(--accent)'}}/> MiniC Compiler — LLVM Backend · Browser Edition
+      </div>
+      <h1 style={{fontSize:40,fontWeight:800,lineHeight:1.1,letterSpacing:'-1px',marginBottom:16}}>
+        Compile C code.<br/><span style={{color:'var(--accent)'}}>Explore every layer.</span>
+      </h1>
+      <p style={{fontSize:15,color:'var(--text2)',lineHeight:1.7,maxWidth:500,marginBottom:28}}>
+        A full compilation pipeline — lexer, parser, semantic analysis, and LLVM IR generation — entirely in your browser. No backend required.
+      </p>
+      <div style={{display:'flex',gap:12,marginBottom:48}}>
+        <button onClick={()=>setPage('compiler')} style={{padding:'11px 28px',background:'var(--accent)',color:'#0d0f14',borderRadius:8,fontWeight:700,fontSize:14,fontFamily:'var(--font-ui)',transition:'opacity 0.15s'}}>Open Compiler →</button>
+        <button onClick={()=>setPage('history')} style={{padding:'11px 28px',background:'transparent',color:'var(--text2)',border:'1px solid var(--border2)',borderRadius:8,fontWeight:500,fontSize:14,fontFamily:'var(--font-ui)'}}>View History</button>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(200px,1fr))',gap:14,marginBottom:36}}>
+        {[
+          {icon:'◈',t:'Lexical Analysis',d:'Tokenizes C into typed tokens with line/col.'},
+          {icon:'⬢',t:'AST Generation',d:'Interactive syntax tree you can explore.'},
+          {icon:'◇',t:'LLVM IR Output',d:'Real LLVM intermediate representation.'},
+          {icon:'▶',t:'In-Browser Execution',d:'Interprets and runs your MiniC code.'},
+          {icon:'◎',t:'Compile History',d:'All sessions saved automatically.'},
+          {icon:'✦',t:'AI Explanations',d:'One-click code explanations via Claude.'},
+        ].map(f=>(
+          <div key={f.t} style={{padding:'18px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:'var(--radius)'}}>
+            <div style={{fontSize:20,marginBottom:8,color:'var(--accent)'}}>{f.icon}</div>
+            <div style={{fontWeight:600,fontSize:13.5,marginBottom:5}}>{f.t}</div>
+            <div style={{fontSize:12,color:'var(--text3)',lineHeight:1.6}}>{f.d}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{display:'flex',gap:7,flexWrap:'wrap'}}>
+        {['int/float','arithmetic','if/else','while','return','printf','functions','recursion','comparisons'].map(s=>(
+          <span key={s} style={{padding:'4px 12px',background:'rgba(74,222,128,0.06)',border:'1px solid rgba(74,222,128,0.15)',borderRadius:20,fontSize:12,color:'var(--text2)',fontFamily:'var(--font-mono)'}}>{s}</span>
+        ))}
+      </div>
+    </div>
+  );
+
+  const renderCompiler = () => (
+    <div style={{display:'flex',flexDirection:'column',height:'100%',overflow:'hidden'}}>
+      {/* Toolbar */}
+      <div style={{display:'flex',alignItems:'center',gap:10,padding:'12px 18px',borderBottom:'1px solid var(--border)',background:'var(--bg2)',flexShrink:0,flexWrap:'wrap'}}>
+        <span style={{fontSize:13,fontWeight:700,color:'var(--text3)',fontFamily:'var(--font-mono)'}}>main.c</span>
+        {status && (
+          <span style={{fontSize:11.5,fontFamily:'var(--font-mono)',color:status.type==='error'?'var(--error)':'var(--accent)',background:status.type==='error'?'rgba(248,113,113,0.08)':'rgba(74,222,128,0.08)',border:`1px solid ${status.type==='error'?'rgba(248,113,113,0.2)':'rgba(74,222,128,0.2)'}`,padding:'3px 10px',borderRadius:20}}>
+            {status.msg}
+          </span>
+        )}
+        <div style={{flex:1}}/>
+        <div style={{position:'relative'}}>
+          <button onClick={()=>setShowExamples(s=>!s)} style={{padding:'7px 14px',background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border)',borderRadius:8,fontSize:12.5,fontFamily:'var(--font-ui)',cursor:'pointer'}}>◎ Examples</button>
+          {showExamples && (
+            <div style={{position:'absolute',top:'100%',right:0,marginTop:6,background:'var(--bg3)',border:'1px solid var(--border)',borderRadius:10,zIndex:200,minWidth:160,overflow:'hidden',boxShadow:'0 8px 24px rgba(0,0,0,0.5)'}}>
+              {Object.keys(EXAMPLES).map(name=>(
+                <button key={name} onClick={()=>{setCode(EXAMPLES[name]);setShowExamples(false);setResult(null);setStatus(null);}} style={{display:'block',width:'100%',textAlign:'left',padding:'10px 14px',background:'transparent',color:'var(--text2)',fontSize:13,fontFamily:'var(--font-ui)',borderBottom:'1px solid var(--border)',cursor:'pointer'}}
+                  onMouseEnter={e=>{e.target.style.background='var(--bg2)';e.target.style.color='var(--text)'}}
+                  onMouseLeave={e=>{e.target.style.background='transparent';e.target.style.color='var(--text2)'}}
+                >{name}</button>
+              ))}
+            </div>
+          )}
+        </div>
+        <button onClick={()=>{setCode('');setResult(null);setStatus(null);setExplanation(null);}} style={{padding:'7px 12px',background:'var(--bg3)',color:'var(--text3)',border:'1px solid var(--border)',borderRadius:8,fontSize:12.5,fontFamily:'var(--font-ui)',cursor:'pointer'}}>✕ Clear</button>
+        <button onClick={handleExplain} disabled={explaining||!code.trim()} style={{padding:'7px 14px',background:'rgba(244,114,182,0.1)',color:'var(--accent3)',border:'1px solid rgba(244,114,182,0.25)',borderRadius:8,fontSize:12.5,fontFamily:'var(--font-ui)',cursor:'pointer',opacity:explaining?0.6:1}}>{explaining?'⟳ Thinking…':'✦ Explain'}</button>
+        <button onClick={handleCompile} disabled={loading||!code.trim()} style={{padding:'8px 22px',background:loading?'var(--bg3)':'var(--accent)',color:loading?'var(--text3)':'#0d0f14',border:'none',borderRadius:8,fontSize:13,fontWeight:700,fontFamily:'var(--font-ui)',cursor:'pointer',opacity:loading?0.7:1,minWidth:110}}>
+          {loading?'⟳ Compiling…':'▶ Compile'}
+        </button>
+      </div>
+
+      {/* Main split */}
+      <div style={{flex:1,display:'flex',overflow:'hidden'}}>
+        {/* Editor */}
+        <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden',padding:'12px 8px 12px 14px',minWidth:0}}>
+          <div style={{flex:1,overflow:'hidden'}}><CodeEditor code={code} onChange={setCode}/></div>
+          {explanation && (
+            <div style={{marginTop:10,padding:'12px 14px',background:'rgba(244,114,182,0.05)',border:'1px solid rgba(244,114,182,0.2)',borderRadius:8,maxHeight:160,overflow:'auto',flexShrink:0}}>
+              <div style={{display:'flex',alignItems:'center',marginBottom:6}}>
+                <span style={{color:'var(--accent3)',fontWeight:700,fontSize:12}}>✦ AI Explanation</span>
+                <button onClick={()=>setExplanation(null)} style={{marginLeft:'auto',background:'transparent',color:'var(--text3)',fontSize:13,cursor:'pointer'}}>✕</button>
+              </div>
+              <div style={{fontSize:12.5,color:'var(--text2)',lineHeight:1.7,whiteSpace:'pre-wrap'}}>{explanation}</div>
+            </div>
+          )}
+        </div>
+        <div style={{width:1,background:'var(--border)',flexShrink:0,margin:'12px 0'}}/>
+        {/* Output */}
+        <div style={{flex:1,padding:'12px 14px 12px 8px',overflow:'hidden',minWidth:0,display:'flex',flexDirection:'column'}}>
+          {renderOutputTabs()}
+        </div>
+      </div>
+    </div>
+  );
+
+  const TABS = [{id:'tokens',label:'Tokens',icon:'◈'},{id:'ast',label:'AST',icon:'⬢'},{id:'ir',label:'LLVM IR',icon:'◇'},{id:'output',label:'Output',icon:'▶'}];
+
+  const renderOutputTabs = () => (
+    <div style={{display:'flex',flexDirection:'column',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:'var(--radius)',overflow:'hidden',height:'100%'}}>
+      <div style={{display:'flex',gap:2,padding:'7px 8px 0',borderBottom:'1px solid var(--border)',background:'var(--bg3)',flexShrink:0}}>
+        {TABS.map(t=>(
+          <button key={t.id} onClick={()=>setActiveTab(t.id)} style={{
+            display:'flex',alignItems:'center',gap:6,padding:'6px 12px 8px',borderRadius:'6px 6px 0 0',
+            fontFamily:'var(--font-ui)',fontSize:12.5,fontWeight:activeTab===t.id?600:400,
+            color:activeTab===t.id?'var(--accent)':'var(--text3)',background:activeTab===t.id?'var(--bg2)':'transparent',
+            borderBottom:activeTab===t.id?'2px solid var(--accent)':'2px solid transparent',cursor:'pointer',transition:'all 0.1s',
+          }}>
+            <span style={{fontSize:13}}>{t.icon}</span>{t.label}
+            {t.id==='tokens'&&result?.tokens?.length>0&&<span style={{fontSize:10,background:'rgba(74,222,128,0.15)',color:'var(--accent)',borderRadius:10,padding:'1px 6px',fontFamily:'var(--font-mono)'}}>{result.tokens.length}</span>}
+            {t.id==='output'&&result?.errors?.length>0&&<span style={{fontSize:10,background:'rgba(248,113,113,0.15)',color:'var(--error)',borderRadius:10,padding:'1px 6px',fontFamily:'var(--font-mono)'}}>{result.errors.length}</span>}
+          </button>
+        ))}
+      </div>
+      <div style={{flex:1,overflow:'auto'}}>
+        {activeTab==='tokens' && renderTokens()}
+        {activeTab==='ast' && (
+          <div style={{padding:'12px',overflow:'auto',height:'100%',fontFamily:'var(--font-mono)',fontSize:12}}>
+            {result?.ast ? <><div style={{padding:'8px 12px',marginBottom:10,background:'rgba(34,211,238,0.06)',border:'1px solid rgba(34,211,238,0.15)',borderRadius:7,fontSize:11.5,color:'var(--text3)'}}>💡 Click nodes to expand/collapse</div><ASTNode node={result.ast}/></> : <EmptyState icon="⬢" msg="Compile first to see AST"/>}
+          </div>
+        )}
+        {activeTab==='ir' && renderIR()}
+        {activeTab==='output' && renderOutput()}
+      </div>
+    </div>
+  );
+
+  const renderTokens = () => {
+    if (result?.errors?.length>0 && !result?.tokens?.length) return <ErrorList errors={result.errors}/>;
+    if (!result?.tokens?.length) return <EmptyState icon="◈" msg="Compile code to see tokens"/>;
+    return (
+      <div style={{padding:'10px',overflow:'auto',height:'100%'}}>
+        {result.errors?.length>0 && <ErrorList errors={result.errors} compact/>}
+        <div style={{display:'grid',gridTemplateColumns:'40px 1fr 1fr 50px 50px',gap:'1px',background:'var(--border)',borderRadius:8,overflow:'hidden',fontFamily:'var(--font-mono)',fontSize:11.5}}>
+          {['#','Type','Value','Line','Col'].map(h=><div key={h} style={{padding:'6px 10px',background:'var(--bg3)',color:'var(--text3)',fontSize:10,fontWeight:600,letterSpacing:'0.5px',textTransform:'uppercase'}}>{h}</div>)}
+          {result.tokens.map((t,i)=>[
+            <div key={`${i}n`} style={{padding:'5px 10px',background:i%2===0?'var(--bg2)':'var(--bg3)',color:'var(--text3)'}}>{i+1}</div>,
+            <div key={`${i}t`} style={{padding:'5px 10px',background:i%2===0?'var(--bg2)':'var(--bg3)'}}><span style={{color:TOKEN_COLORS[t.type]||'var(--text2)',background:`${TOKEN_COLORS[t.type]||'#94a3b8'}18`,borderRadius:4,padding:'1px 6px',fontSize:10.5}}>{t.type}</span></div>,
+            <div key={`${i}v`} style={{padding:'5px 10px',background:i%2===0?'var(--bg2)':'var(--bg3)',color:'var(--text)',fontWeight:500}}>{t.value}</div>,
+            <div key={`${i}l`} style={{padding:'5px 10px',background:i%2===0?'var(--bg2)':'var(--bg3)',color:'var(--text3)'}}>{t.line}</div>,
+            <div key={`${i}c`} style={{padding:'5px 10px',background:i%2===0?'var(--bg2)':'var(--bg3)',color:'var(--text3)'}}>{t.col}</div>,
+          ])}
+        </div>
+      </div>
+    );
+  };
+
+  const renderIR = () => {
+    if (!result?.ir) return <EmptyState icon="◇" msg="Compile code to see LLVM IR"/>;
+    const lines = result.ir.split('\n');
+    return (
+      <div style={{padding:'10px',overflow:'auto',height:'100%'}}>
+        {result.errors?.length>0 && <ErrorList errors={result.errors} compact/>}
+        <div style={{background:'#0d1117',borderRadius:8,border:'1px solid var(--border)',padding:'14px',fontFamily:'var(--font-mono)',fontSize:12.5,lineHeight:'22px'}}>
+          {lines.map((line,i)=>{
+            let color='#c9d1d9',fw='normal',fi='normal';
+            if(line.startsWith(';')){color='#8b949e';fi='italic';}
+            else if(line.startsWith('define')||line.startsWith('declare')){color='#ff7b72';fw='600';}
+            else if(line.startsWith('target')){color='#8b949e';}
+            else if(/^[a-zA-Z_]\w*:$/.test(line.trim())){color='#79c0ff';fw='600';}
+            else if(line.includes('= alloca')){color='#d2a8ff';}
+            else if(line.includes('store')||line.includes('load')){color='#79c0ff';}
+            else if(line.includes('ret ')){color='#56d364';}
+            else if(line.includes('br ')){color='#f0883e';}
+            else if(line.includes('call')){color='#ffa657';}
+            else if(line.includes('icmp')||line.includes('add')||line.includes('sub')||line.includes('mul')){color='#d2a8ff';}
+            return(
+              <div key={i} style={{display:'flex',fontStyle:fi,fontWeight:fw}}>
+                <span style={{color:'#3d444d',width:32,textAlign:'right',marginRight:14,userSelect:'none',flexShrink:0}}>{i+1}</span>
+                <span style={{color}}>{line||' '}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  const renderOutput = () => {
+    if (!result) return <EmptyState icon="▶" msg="Compile code to see output"/>;
+    return (
+      <div style={{padding:'10px',overflow:'auto',height:'100%'}}>
+        {result.errors?.length>0 && <ErrorList errors={result.errors} compact/>}
+        {result.output && (
+          <div style={{background:'#0a0c10',borderRadius:8,border:`1px solid ${result.errors?.length?'rgba(248,113,113,0.25)':'var(--border)'}`,padding:'14px'}}>
+            <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:10,paddingBottom:8,borderBottom:'1px solid var(--border)'}}>
+              <div style={{width:7,height:7,borderRadius:'50%',background:result.errors?.length?'var(--error)':'var(--accent)',boxShadow:`0 0 5px ${result.errors?.length?'var(--error)':'var(--accent)'}`}}/>
+              <span style={{color:'var(--text3)',fontSize:11,fontFamily:'var(--font-mono)'}}>Program Output</span>
+            </div>
+            <pre style={{color:result.errors?.length?'var(--error)':'var(--accent)',fontFamily:'var(--font-mono)',fontSize:13,whiteSpace:'pre-wrap',wordBreak:'break-word',lineHeight:1.7}}>
+              {result.output}
+            </pre>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const EmptyState = ({icon, msg}) => (
+    <div style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:180,gap:10,color:'var(--text3)'}}>
+      <div style={{fontSize:26}}>{icon}</div>
+      <div style={{fontFamily:'var(--font-mono)',fontSize:12}}>{msg}</div>
+    </div>
+  );
+
+  const ErrorList = ({errors, compact}) => (
+    <div style={{marginBottom:compact?10:0,padding:compact?0:12}}>
+      {errors.map((e,i)=>(
+        <div key={i} style={{display:'flex',gap:8,alignItems:'flex-start',padding:'7px 10px',marginBottom:5,background:'rgba(248,113,113,0.07)',border:'1px solid rgba(248,113,113,0.2)',borderRadius:7,fontFamily:'var(--font-mono)',fontSize:11.5,color:'var(--error)'}}>
+          <span style={{flexShrink:0}}>✕</span><span>{e}</span>
+        </div>
+      ))}
+    </div>
+  );
+
+  const renderAST = () => (
+    <div style={{height:'100%',display:'flex',flexDirection:'column',overflow:'hidden'}}>
+      <div style={{padding:'16px 22px 12px',borderBottom:'1px solid var(--border)',background:'var(--bg2)',flexShrink:0,display:'flex',alignItems:'center',gap:10}}>
+        <span style={{fontSize:18,color:'var(--accent2)'}}>⬢</span>
+        <div><div style={{fontWeight:700,fontSize:15}}>AST Viewer</div><div style={{fontSize:11.5,color:'var(--text3)'}}>Abstract Syntax Tree — click to expand/collapse</div></div>
+        {result?.ast && <span style={{marginLeft:'auto',fontSize:11,color:'var(--accent)',background:'rgba(74,222,128,0.08)',border:'1px solid rgba(74,222,128,0.2)',padding:'3px 10px',borderRadius:20,fontFamily:'var(--font-mono)'}}>✓ AST ready</span>}
+      </div>
+      <div style={{flex:1,overflow:'auto',padding:'16px 18px',fontFamily:'var(--font-mono)',fontSize:12}}>
+        {result?.ast ? <ASTNode node={result.ast}/> : (
+          <div style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:260,gap:12,color:'var(--text3)'}}>
+            <div style={{fontSize:30}}>⬢</div>
+            <div style={{fontSize:13}}>Compile some code first to see the AST</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const renderHistory = () => {
+    const [sel, setSel] = useState(null);
+    return (
+      <div style={{height:'100%',display:'flex',flexDirection:'column',overflow:'hidden'}}>
+        <div style={{padding:'16px 22px 12px',borderBottom:'1px solid var(--border)',background:'var(--bg2)',flexShrink:0}}>
+          <div style={{fontWeight:700,fontSize:15,display:'flex',alignItems:'center',gap:8}}><span style={{color:'var(--accent2)'}}>◎</span> Compile History</div>
+          <div style={{fontSize:11.5,color:'var(--text3)'}}>All sessions saved in-memory for this session</div>
+        </div>
+        <div style={{flex:1,display:'flex',overflow:'hidden'}}>
+          <div style={{width:300,borderRight:'1px solid var(--border)',overflow:'auto',flexShrink:0}}>
+            {history_store.length===0 ? (
+              <div style={{padding:28,textAlign:'center',color:'var(--text3)',fontSize:13}}>No history yet. Compile some code!</div>
+            ) : history_store.map(e=>(
+              <div key={e.id} onClick={()=>setSel(e)} style={{padding:'12px 16px',borderBottom:'1px solid var(--border)',cursor:'pointer',background:sel?.id===e.id?'rgba(74,222,128,0.06)':'transparent',transition:'background 0.1s'}}
+                onMouseEnter={ev=>{if(sel?.id!==e.id)ev.currentTarget.style.background='var(--bg3)'}}
+                onMouseLeave={ev=>{if(sel?.id!==e.id)ev.currentTarget.style.background='transparent'}}
+              >
+                <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+                  <span style={{fontSize:10,padding:'2px 7px',borderRadius:4,background:e.error_count>0?'rgba(248,113,113,0.15)':'rgba(74,222,128,0.12)',color:e.error_count>0?'var(--error)':'var(--accent)',fontFamily:'var(--font-mono)'}}>
+                    {e.error_count>0?`${e.error_count} errors`:'✓ OK'}
+                  </span>
+                  <span style={{marginLeft:'auto',fontSize:10.5,color:'var(--text3)'}}>{new Date(e.timestamp).toLocaleTimeString()}</span>
+                </div>
+                <div style={{fontFamily:'var(--font-mono)',fontSize:11,color:'var(--text2)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{e.code?.split('\n')[0]||'(empty)'}</div>
+                <div style={{display:'flex',gap:10,marginTop:4}}><span style={{fontSize:10,color:'var(--text3)'}}>{e.token_count} tokens</span>{e.has_ir&&<span style={{fontSize:10,color:'var(--accent2)'}}>IR generated</span>}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{flex:1,overflow:'auto',padding:'18px 22px'}}>
+            {sel ? (
+              <div>
+                <div style={{display:'flex',gap:10,marginBottom:14,flexWrap:'wrap'}}>
+                  {[['Status',sel.error_count>0?`${sel.error_count} Errors`:'Success',sel.error_count>0?'var(--error)':'var(--accent)'],['Tokens',sel.token_count,'var(--text)'],['Time',new Date(sel.timestamp).toLocaleTimeString(),'var(--text)']].map(([l,v,c])=>(
+                    <div key={l} style={{padding:'10px 14px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:8}}>
+                      <div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:3}}>{l}</div>
+                      <div style={{fontWeight:600,color:c,fontSize:13}}>{v}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{fontSize:11.5,color:'var(--text3)',marginBottom:7}}>Code</div>
+                <pre style={{fontFamily:'var(--font-mono)',fontSize:12,background:'#1e1e2e',border:'1px solid var(--border)',borderRadius:8,padding:'14px',color:'#f8f8f2',overflow:'auto',lineHeight:'20px',whiteSpace:'pre'}}>
+                  {sel.code}
+                </pre>
+              </div>
+            ) : (
+              <div style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:240,gap:12,color:'var(--text3)'}}>
+                <div style={{fontSize:28}}>◎</div>
+                <div style={{fontSize:13}}>Select an entry to view details</div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderSettings = () => (
+    <div style={{height:'100%',overflow:'auto',padding:'24px 32px',maxWidth:600}}>
+      <div style={{fontWeight:700,fontSize:18,marginBottom:4,display:'flex',alignItems:'center',gap:8}}><span style={{color:'var(--text3)'}}>◇</span> Settings</div>
+      <div style={{fontSize:13,color:'var(--text3)',marginBottom:28}}>Compiler configuration and preferences</div>
+
+      {[
+        {section:'Compiler Info', items:[
+          {label:'Engine',val:'In-Browser JS (no backend needed)',note:'Full pipeline runs client-side'},
+          {label:'Supported Types',val:'int, float'},
+          {label:'Supported Constructs',val:'if/else, while, return, printf, functions'},
+        ]},
+        {section:'Frontend', items:[
+          {label:'Framework',val:'React 18 + Vite 5'},
+          {label:'Editor',val:'Custom syntax highlighter'},
+          {label:'Font',val:'JetBrains Mono + Syne'},
+        ]},
+        {section:'Optional Backend', items:[
+          {label:'Server',val:'Flask on localhost:5000'},
+          {label:'Database',val:'MongoDB (optional)'},
+          {label:'Install',val:'pip install flask flask-cors pymongo'},
+        ]},
+      ].map(({section,items})=>(
+        <div key={section} style={{marginBottom:28}}>
+          <div style={{fontSize:10,color:'var(--text3)',letterSpacing:'1px',textTransform:'uppercase',marginBottom:10}}>{section}</div>
+          <div style={{background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'0 16px'}}>
+            {items.map(({label,val,note},i)=>(
+              <div key={label} style={{display:'flex',alignItems:'center',gap:12,padding:'12px 0',borderBottom:i<items.length-1?'1px solid var(--border)':'none'}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:13,fontWeight:500}}>{label}</div>
+                  {note&&<div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>{note}</div>}
+                </div>
+                <span style={{fontSize:12,color:'var(--text2)',fontFamily:'var(--font-mono)',textAlign:'right'}}>{val}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+
+  const pages = {home:renderHome,compiler:renderCompiler,ast:renderAST,history:renderHistory,settings:renderSettings};
+
+  return (
+    <div style={{display:'flex',height:'100vh',overflow:'hidden'}}>
+      {/* Sidebar */}
+      <aside style={{width:210,background:'var(--bg2)',borderRight:'1px solid var(--border)',display:'flex',flexDirection:'column',flexShrink:0}}>
+        <div style={{padding:'22px 18px 18px',borderBottom:'1px solid var(--border)'}}>
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            <div style={{width:32,height:32,background:'linear-gradient(135deg,var(--accent),var(--accent2))',borderRadius:8,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800,fontSize:16,color:'#0d0f14',flexShrink:0}}>M</div>
+            <div>
+              <div style={{fontWeight:700,fontSize:14.5,letterSpacing:'-0.3px'}}>MiniC</div>
+              <div style={{fontSize:9.5,color:'var(--text3)',letterSpacing:'0.5px',textTransform:'uppercase'}}>LLVM Compiler</div>
+            </div>
+          </div>
+        </div>
+        <nav style={{padding:'10px 8px',flex:1}}>
+          <div style={{fontSize:9.5,color:'var(--text3)',letterSpacing:'1px',textTransform:'uppercase',padding:'4px 10px 8px'}}>Navigation</div>
+          {PAGES.map(p=>(
+            <button key={p} onClick={()=>setPage(p)} style={{
+              display:'flex',alignItems:'center',gap:10,width:'100%',padding:'9px 12px',
+              borderRadius:8,marginBottom:2,background:page===p?'rgba(74,222,128,0.08)':'transparent',
+              color:page===p?'var(--accent)':'var(--text2)',fontWeight:page===p?600:400,
+              fontSize:13,cursor:'pointer',fontFamily:'var(--font-ui)',transition:'all 0.12s',
+              border:'none',textAlign:'left',
+            }}>
+              <span style={{fontSize:15}}>{PAGE_ICONS[p]}</span>{PAGE_LABELS[p]}
+            </button>
+          ))}
+        </nav>
+        <div style={{padding:'12px 14px',borderTop:'1px solid var(--border)',fontSize:11}}>
+          <div style={{display:'flex',alignItems:'center',gap:6,color:'var(--text3)'}}>
+            <div style={{width:6,height:6,borderRadius:'50%',background:'var(--accent)',boxShadow:'0 0 5px var(--accent)'}}/>
+            In-Browser Mode
+          </div>
+        </div>
+      </aside>
+
+      {/* Main */}
+      <main style={{flex:1,overflow:'hidden',display:'flex',flexDirection:'column',background:'var(--bg)'}}>
+        {(pages[page]||pages.home)()}
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
