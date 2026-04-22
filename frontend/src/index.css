@@ -1,0 +1,84 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&family=Clash+Display:wght@400;500;600;700&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:        #0a0b0e;
+  --bg2:       #0f1117;
+  --bg3:       #151820;
+  --bg4:       #1c2030;
+  --bg5:       #232840;
+  --border:    #1e2235;
+  --border2:   #2a3050;
+  --border3:   #353d5e;
+
+  --amber:     #f59e0b;
+  --amber2:    #fbbf24;
+  --amber-dim: #f59e0b33;
+  --cyan:      #22d3ee;
+  --cyan-dim:  #22d3ee22;
+  --green:     #4ade80;
+  --green-dim: #4ade8020;
+  --rose:      #fb7185;
+  --violet:    #a78bfa;
+
+  --text:      #e8eaf2;
+  --text2:     #7c8aaa;
+  --text3:     #3d4a6a;
+  --text4:     #252e45;
+
+  --error:     #fb7185;
+  --warn:      #fbbf24;
+  --success:   #4ade80;
+
+  --sidebar-w: 228px;
+  --radius:    12px;
+  --font-mono: 'IBM Plex Mono', 'Fira Code', monospace;
+  --font-ui:   'Clash Display', system-ui, sans-serif;
+
+  --glow-amber: 0 0 20px #f59e0b33;
+  --glow-cyan:  0 0 20px #22d3ee33;
+  --glow-green: 0 0 20px #4ade8030;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border3); }
+
+/* Selection */
+::selection { background: var(--amber-dim); color: var(--text); }
+
+button { font-family: var(--font-ui); cursor: pointer; border: none; outline: none; transition: all 0.15s; }
+input, textarea, select { font-family: var(--font-mono); outline: none; }
+
+/* Noise overlay on body */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.4;
+}
+
+@keyframes fadeIn   { from { opacity:0; transform:translateY(8px) } to { opacity:1; transform:none } }
+@keyframes slideIn  { from { opacity:0; transform:translateX(-8px) } to { opacity:1; transform:none } }
+@keyframes pulse    { 0%,100%{opacity:1} 50%{opacity:.4} }
+@keyframes spin     { to { transform:rotate(360deg) } }
+@keyframes glow     { 0%,100%{box-shadow:var(--glow-amber)} 50%{box-shadow:0 0 32px #f59e0b66} }
+@keyframes scanline { 0%{transform:translateY(-100%)} 100%{transform:translateY(100vh)} }
+@keyframes blink    { 0%,100%{opacity:1} 49%{opacity:1} 50%,99%{opacity:0} }
