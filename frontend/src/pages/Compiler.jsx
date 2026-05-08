@@ -126,21 +126,43 @@ export default function Compiler() {
     setLoading(false)
   }, [stdin])
 
+  // const explain = async () => {
+  //   setExplaining(true); setExplanation('')
+  //   try {
+  //     const r = await fetch('https://api.anthropic.com/v1/messages', {
+  //       method:'POST', headers:{'Content-Type':'application/json'},
+  //       body: JSON.stringify({
+  //         model:'claude-sonnet-4-20250514', max_tokens:500,
+  //         messages:[{role:'user',content:`Explain this C code in 5 concise bullet points for a compiler student. Focus on algorithms, control flow, and what the compiler will do:\n\n${code}`}]
+  //       })
+  //     })
+  //     const data = await r.json()
+  //     setExplanation(data.content?.[0]?.text || 'API access required.')
+  //   } catch { setExplanation('Requires Anthropic API access in browser.') }
+  //   setExplaining(false)
+  // }
+
   const explain = async () => {
-    setExplaining(true); setExplanation('')
-    try {
-      const r = await fetch('https://api.anthropic.com/v1/messages', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({
-          model:'claude-sonnet-4-20250514', max_tokens:500,
-          messages:[{role:'user',content:`Explain this C code in 5 concise bullet points for a compiler student. Focus on algorithms, control flow, and what the compiler will do:\n\n${code}`}]
-        })
-      })
-      const data = await r.json()
-      setExplanation(data.content?.[0]?.text || 'API access required.')
-    } catch { setExplanation('Requires Anthropic API access in browser.') }
-    setExplaining(false)
+  setExplaining(true)
+  setExplanation('')
+
+  try {
+    const res = await fetch("http://localhost:5000/api/explain", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ code })
+    })
+
+    const data = await res.json()
+    setExplanation(data.explanation)
+  } catch (e) {
+    setExplanation("Error connecting to backend.")
   }
+
+  setExplaining(false)
+}
 
   const stageIcon = (k) => {
     const s = stages[k]

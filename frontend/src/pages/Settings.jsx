@@ -1,4 +1,7 @@
 import { useState } from 'react'
+import ThemeToggle from "../components/ThemeToggle";
+
+<ThemeToggle />
 
 // ─── Functional settings that actually work ───────────────────────────────
 export default function Settings() {
@@ -83,6 +86,36 @@ export default function Settings() {
     <div style={{ height: '100%', overflowY: 'auto', padding: '28px 36px 40px' }}>
       {/* Header */}
       <div style={{ marginBottom: 28 }}>
+        {/* Header */}
+<div style={{ 
+  marginBottom: 28, 
+  display: "flex", 
+  justifyContent: "space-between", 
+  alignItems: "center" 
+}}>
+  <div>
+    <h2 style={{
+      fontWeight: 700, fontSize: 22, letterSpacing: '-0.5px',
+      fontFamily: 'var(--font-ui)', marginBottom: 5,
+      background: 'linear-gradient(90deg, var(--text), var(--amber2))',
+      WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+      display: 'inline-block',
+    }}>
+      Settings
+    </h2>
+
+    <p style={{
+      fontSize: 12,
+      color: 'var(--text3)',
+      fontFamily: 'var(--font-mono)'
+    }}>
+      Configure your compiler environment
+    </p>
+  </div>
+
+  {/* ✅ THEME TOGGLE HERE */}
+  <ThemeToggle />
+</div>
         <h2 style={{
           fontWeight: 700, fontSize: 22, letterSpacing: '-0.5px',
           fontFamily: 'var(--font-ui)', marginBottom: 5,

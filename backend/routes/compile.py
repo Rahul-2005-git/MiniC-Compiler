@@ -1,11 +1,51 @@
+from xml.parsers.expat import model
+
 from flask import Blueprint, request, jsonify
 from datetime import datetime
 import traceback
+import google.generativeai as genai
 
 compile_bp = Blueprint('compile', __name__)
-
+genai.configure(api_key="AIzaSyBDR3U3_kIgAxcr-J0xBo4nfoLoRndb3m0")
 history_store = []
 
+
+def explain_code(code):
+    try:
+        model = genai.GenerativeModel("gemini-pro")
+
+        prompt = f"""
+You are a compiler expert.
+
+Explain this C code clearly:
+1. What the program does
+2. Step-by-step logic
+3. Key operations
+4. Output
+
+Code:
+{code}
+"""
+
+        response = model.generate_content(prompt)
+
+        return response.text
+
+    except Exception as e:
+        return f"Explain error: {str(e)}"
+
+
+# ✅ OUTSIDE FUNCTION
+@compile_bp.route('/explain', methods=['POST'])
+def explain_route():
+    data = request.get_json()
+    code = data.get("code", "")
+
+    explanation = explain_code(code)
+
+    return jsonify({
+        "explanation": explanation
+    })
 @compile_bp.route('/compile', methods=['POST'])
 def compile_code():
     data = request.get_json()

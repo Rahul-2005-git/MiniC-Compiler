@@ -258,7 +258,7 @@ export default function Home() {
 
           {/* Code block */}
           <div style={{
-            flex: 1, background: '#0d1117', borderRadius: 12,
+            flex: 1, background: 'var(--bg3)', borderRadius: 12,
             border: '1px solid var(--border)',
             padding: '18px 20px', fontFamily: 'var(--font-mono)',
             fontSize: 13, lineHeight: '22px', overflow: 'hidden',
